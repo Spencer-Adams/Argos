@@ -3,191 +3,147 @@ import numpy as np
 from tabulate import tabulate
 np.set_printoptions(precision=15)
 
-class vortex_panels:
+class Relaxation:
     """This class contains functions that calculates position of nodes, control points, li, xi, eta, phi, psi, P_matrix, A_matrix, gamma_vector, cartesian_velocity, C_p, C_L, C_mle, C_mc/4"""
+
     def __init__(self, json_file):
         self.json_file = json_file
         self.load_json()
-        self.pull_length_alpha()
 
     def load_json(self):
         """This function pulls in all the input values from the json"""
         with open(self.json_file, 'r') as json_handle:
             input_vals = json.load(json_handle)
             self.airfoils = input_vals['airfoils']
-            self.alpha_deg = np.radians(input_vals["alpha[deg]"])
-            self.vel_inf = input_vals["freestream_velocity"]
+            self.alpha_deg = input_vals["alpha[deg]"]
+            self.alpha_rad = np.radians(self.alpha_deg)
+            self.V_inf = input_vals["freestream_velocity"]
+            self.V_inf_vec = np.array([self.V_inf*np.cos(self.alpha_rad), self.V_inf*np.sin(self.alpha_rad)], dtype=float)
+            self.initial_vortex = input_vals["initial_vortex"]
+            self.acceptable_vort_error = input_vals["acceptable_vort_error"]
+            self.acceptable_source_error = input_vals["acceptable_source_error"]
+            self.acceptable_Kutta_error = input_vals["acceptable_Kutta_error"]
+            self.max_relaxation_iterations = input_vals["max_relaxation_iterations"]
+            self.vortex_relaxation_factor = input_vals["vortex_relaxation_factor"]
+            self.source_relaxation_factor = input_vals["source_relaxation_factor"]
 
     def pull_nodes(self, i):
         """This function grabs the text files inside the json and turns them into arrays"""
         foil = self.airfoils[i]
         with open(foil, 'r') as text_handle:
             points = [list(map(float, line.strip().split())) for line in text_handle]
-        self.geometry = np.array(points)
-    
-    def pull_label(self, i):
-        """This function finds the title of each text file to clarify the output table"""
-        with open(self.json_file, 'r') as json_handle:
-            input_vals = json.load(json_handle)
-            foil = input_vals['airfoils'][i]  
-        self.label = foil
+        self.control_points = np.array(points)
+        self.N = len(self.control_points)
 
-    def pull_length_alpha(self):
-        """This function p"""
-        with open(self.json_file, 'r') as json_handle:
-            input_vals = json.load(json_handle)
-            alpha = np.radians(input_vals["alpha[deg]"]) 
-            length = len(alpha)
-        self.length_alpha = length
-    
-    def pull_alpha(self, j):
-        """This allows us to solve for the coefficients at a given angle of attack."""
-        self.alpha = self.alpha_deg[j]
-    
-    def calc_control_points(self):
-        """Given a list of nodes, this function calculates the control points by taking the average position of each pair adjacent nodes and returns them in a Nx2 list"""
-        NACA_list = self.geometry
-        control_points = []
-        for i in range(0, len(NACA_list)-1):
-            x1, y1 = NACA_list[i]
-            x2, y2 = NACA_list[i+1]
-            point = [(x1 + x2)/2, (y1 + y2)/2]
-            control_points.append(point)
-        control_points_array = np.array(control_points)
-        self.control_points = control_points_array
+    def Argos_init(self):
+        """Given the nodes and freestream velocity, compute unit tangent and unit normal vectors, Delta s, and K, and initialize sigma and omega for each control point"""
+        ### Begin with initializing unit_tangent_matrix, unit_normal_matrix, Delta_s_vector, source_vector, and vortex_vector ###
+        ### Initialize numpy arrays for each of the matrices and vectors
+        self.unit_tangent_matrix = np.zeros((self.N,2))
+        self.unit_normal_matrix = np.zeros((self.N,2))
+        self.Delta_s_vector = np.zeros(self.N)
+        self.source_vector = np.zeros(self.N)
+        self.vortex_vector = np.zeros(self.N)
+        ### loop through all control points ###
+        for i in range(self.N):
+            if (i==0):
+                tangent_vector = self.control_points[i+1]-self.control_points[i]
+                self.Delta_s_vector[i] = np.linalg.norm(tangent_vector)
+            elif (i==self.N-1):
+                tangent_vector = self.control_points[i]-self.control_points[i-1]
+                self.Delta_s_vector[i] = np.linalg.norm(tangent_vector)
+            else:
+                tangent_vector = self.control_points[i+1]-self.control_points[i]
+                p1 = self.control_points[i+1]-self.control_points[i]
+                p2 = self.control_points[i]-self.control_points[i-1]
+                self.Delta_s_vector[i] = 0.5*(np.linalg.norm(p1) + np.linalg.norm(p2))
+            self.unit_tangent_matrix[i] = tangent_vector/np.linalg.norm(tangent_vector)
+            normal_vector = np.array([-tangent_vector[1],tangent_vector[0]])
+            self.unit_normal_matrix[i] = normal_vector/np.linalg.norm(normal_vector)
+            self.source_vector[i] = -np.dot(self.unit_normal_matrix[i],self.V_inf_vec)
+            self.vortex_vector[i] = self.initial_vortex
+        # now initialize the Kernel "K" matrix, which is NxN. Each entry is a 2-D vector.
+        print("initial source vector:\n", self.source_vector)
+        print("initial vortex vector:\n", self.vortex_vector)
+        self.init_Kernel()
 
-    def calc_L(self):
-        """Given a list of nodes, this function calculates each value of L_j and returns them in an 1xN list"""
-        points_list = self.geometry
-        x, y = points_list[:, 0], points_list[:, 1]
-        diff_x = np.diff(x)
-        diff_y = np.diff(y)
-        L_vals = np.sqrt(diff_x**2 + diff_y**2)
-        self.L_vals = L_vals
-   
-    def calc_xi_eta_phi_psi(self, control_x, control_y, point_x_2, point_x_1, point_y_2, point_y_1, L):
-        """This function calculates the xi, eta, phi, and psi values given a list of nodes and control points"""
-        xi = (1/L)*((point_x_2-point_x_1)*(control_x-point_x_1)+(point_y_2-point_y_1)*(control_y-point_y_1)) # this is the dot product for solving for xi, eq 1.6.20 Mechanics of Flight
-        eta = (1/L)*(-(point_y_2-point_y_1)*(control_x-point_x_1)+(point_x_2-point_x_1)*(control_y-point_y_1)) # this is the dot product for solving for eta, eq 1.6.20 Mechanics of Flight
-        phi = np.arctan2(eta*L, eta**2+xi**2-xi*L) # eq 1.6.21 Mechanics of Flight
-        psi = 0.5*np.log((xi**2+eta**2)/((xi-L)**2+eta**2)) # eq 1.6.22 Mechanics of Flight
-        rotate_xi_eta = np.array([[(L-xi)*phi+(eta*psi), (xi*phi)-(eta*psi)], [(eta*phi)-((L-xi)*psi)-L, (-eta*phi)-(xi*psi)+L]])
-        return rotate_xi_eta
+    def init_Kernel(self):
+        """creates the kernel matrix"""
+        self.Kernel = np.zeros((self.N,self.N, 2)) # NxN matrix where each entry is a 2D vector.
+        for i in range(self.N):
+            P = self.control_points[i]
+            for j in range(self.N):
+                Q = self.control_points[j]
+                r_QP = P-Q
+                if i != j:
+                    self.Kernel[i][j] = r_QP/(2*np.pi*np.dot(r_QP,r_QP))
+                else:
+                    self.Kernel[i][j] = r_QP
+        print("kernel:\n", self.Kernel)
+        return self.Kernel    
 
-    def calc_p_first(self, x_j_plus_one, x_j, y_j_plus_one, y_j):
-        """This function calculates the first matrix of the p matrix"""
-        rotate_x_y = np.array([[x_j_plus_one-x_j, -(y_j_plus_one-y_j)],[y_j_plus_one-y_j, x_j_plus_one-x_j]])
-        return rotate_x_y
+    def calc_v_matrix(self):
+        """"""  
+        for i in range(self.N):
+            self.V_matrix[i] = self.V_inf_vec.copy()
+            for j in range(self.N):
+                Delta = self.Delta_s_vector[j]
+                Kernel_first = self.Kernel[i][j][0]
+                # print("Kernel First: ", Kernel_first)
+                Kernel_second = self.Kernel[i][j][1]
+                # print("Kernel Second: ", Kernel_second)
+                source = self.source_vector[j]
+                # print("Source in v mat: ", source)
+                vortex = self.vortex_vector[j]
+                # print("Vortex in v mat: ", vortex)
+                if i==j:
+                    self.V_matrix[i] += 0.5*source*self.unit_normal_matrix[j]
+                else:
+                    self.V_matrix[i][0] += (source*Kernel_first + vortex*Kernel_second)*Delta ### using first component of cross product
+                    self.V_matrix[i][1] += (source*Kernel_second - vortex*Kernel_first)*Delta
+        return self.V_matrix
 
-    def calc_p_matrix(self, mat_1, mat_2, L):
-        """This function calculates the p_matrix given the two rotation matrices found in the calc_a_matrix function"""
-        p_matrix = (1/(2*np.pi*(L**2)))*np.matmul(mat_1,mat_2) # eq 1.6.23 Mechanics of Flight
-        return p_matrix
+    def Argos_saver_scheme(self):
+        """"""
+        ell = 0 # initialize count
+        max_vortical_norm = 100 # initialize vortex residual
+        max_source_norm = 100 # initialize source residual
+        self.Res_vortex_vector = np.zeros((self.N))
+        self.Res_source_vector = np.zeros((self.N))
+        self.V_matrix = np.zeros((self.N,2)) # initialize velocity vector
+        while ((max_vortical_norm > self.acceptable_vort_error) or (max_source_norm > self.acceptable_source_error)) and (ell < self.max_relaxation_iterations):
+            self.calc_v_matrix()
+            for i in range(self.N):
+                ## 1. Evaluate total velocity components explicitly on the EXTERNAL face skin
+                Vn_ext = np.dot(self.V_matrix[i], self.unit_normal_matrix[i])# + 0.5 * self.source_vector[i]
+                Vs_ext = np.dot(self.V_matrix[i], self.unit_tangent_matrix[i])# + 0.5 * self.vortex_vector[i]
+                ## 2. Compute Hunt's normal boundary velocity error (Target - Computed)
+                epsilon_n = 0.0 - Vn_ext # 0.0 to remember that Hunt said epsilon_n = Vn-VnBC
+                ## 3. Calculate Hunt's literal relaxation targets
+                sigma_target = -np.dot(self.unit_normal_matrix[i], self.V_inf_vec) + epsilon_n # exactly as hunt defines it
+                omega_target = Vs_ext - np.dot(self.unit_tangent_matrix[i], self.V_inf_vec) # exactly as hunt defines it
+                ## 4. Residuals: current value minus Hunt's target destination
+                self.Res_source_vector[i] = self.source_vector[i] - sigma_target
+                self.Res_vortex_vector[i] = self.vortex_vector[i] - omega_target
+            # i = 0
+            for i in range(self.N):
+                self.vortex_vector[i] -= (self.vortex_relaxation_factor*self.Res_vortex_vector[i])
+                self.source_vector[i] -= (self.source_relaxation_factor*self.Res_source_vector[i])
+            if abs(self.vortex_vector[self.N-1]+self.vortex_vector[0]) > self.acceptable_Kutta_error:
+                print("vort vec[N-1]: ", self.vortex_vector[self.N-1])
+                print("vort vec[0]: ", self.vortex_vector[0])
+                for i in range(self.N):
+                    self.vortex_vector[i] -= 0.5*(self.vortex_vector[self.N-1]+self.vortex_vector[0])
+            max_vortical_norm = np.linalg.norm(self.Res_vortex_vector, ord=np.inf)
+            max_source_norm = np.linalg.norm(self.Res_source_vector,ord=np.inf)
+            ell += 1
 
-    def calc_a_matrix(self):
-        """This function finds the nxn a matrix given a list of nodes, control points, and correct functions that calculate xi,eta,phi,psi,li, and lj"""
-        points_list = self.geometry
-        n = int(len(points_list))
-        x, y = points_list[:,0], points_list[:,1]
-        x_control = self.control_points[:,0]
-        y_control = self.control_points[:,1]
-        a_vals = np.zeros((n, n))  # Initialize an empty array
-        for i in range(0,n-1):
-            for j in range(0,n-1):              
-                l_j = self.L_vals[j]                
-                l_i = self.L_vals[i]
-
-                # define rotation matrix for x and y in the p_matrix calculation
-                p_first = self.calc_p_first(x[j+1], x[j], y[j+1], y[j])
-
-                # define rotation matrix for xi and eta
-                p_second = self.calc_xi_eta_phi_psi(x_control[i], y_control[i], x[j+1], x[j], y[j+1], y[j], l_j)
-
-                # Calculate the P matrix at i, j
-                p_matrix = self.calc_p_matrix(p_first, p_second, l_j) # eq 1.6.23 Mechanics of Flight
-
-                a_vals[i,j] = a_vals[i,j] + ((x[i+1]-x[i])*p_matrix[1,0]-(y[i+1]-y[i])*p_matrix[0,0])/l_i # eq 1.6.25 Mechanics of Flight
-                a_vals[i,j+1] = a_vals[i,j+1] + ((x[i+1]-x[i])*p_matrix[1,1]-(y[i+1]-y[i])*p_matrix[0,1])/l_i # eq 1.6.25 Mechanics of Flight   
-        a_vals[n-1,0] = 1.0 # eq 1.6.26 Mechanics of Flight
-        a_vals[n-1,n-1] = 1.0 # eq 1.6.27 Mechanics of Flight
-        self.A_matrix = a_vals
-
-    def calc_B_matrix(self): # this matrix is the Nx1 matrix that's in equation 4.32 in the Aeronautics engineering handbook
-        """This function finds the d_matrix given the a_matrix and vel_inf"""
-        points_list = self.geometry
-        n = int(len(points_list))
-        x, y = points_list[:,0], points_list[:,1]
-        B_matrix = np.zeros(n)
-        for i in range(0,n-1):
-            diff_x = x[i+1]-x[i]
-            diff_y = y[i+1]-y[i]
-            l_val = self.L_vals[i]
-            B_val = ((diff_y*np.cos(self.alpha))-(diff_x*np.sin(self.alpha)))/l_val
-            B_matrix[i] = B_val
-        self.B_matrix = B_matrix
-   
-    def calc_gammas(self):
-        """This function finds the gamma values given matrix_a, matrix_d and vel_inf"""
-        gammas = np.linalg.solve(self.A_matrix, self.vel_inf*self.B_matrix) # eq 1.6.28 Mechanics of Flight
-        self.gammas = gammas
-   
-    def calc_CL(self):
-        """This function finds CL given gammas, vel_inf, a geometry, and l_i"""
-        gammas = self.gammas
-        vel_inf = self.vel_inf
-        points_list = self.geometry
-        l_i = self.L_vals
-        n = int(len(points_list))
-        Coeff_L = 0.0
-        for i in range(0, n-1):
-            Co_L = l_i[i]*((gammas[i]+gammas[i+1])/(vel_inf)) # eq 1.6.32 Mechanics of Flight
-            Coeff_L += Co_L
-        self.Coeff_L = Coeff_L
-   
-    def calc_Cm_le(self):
-        """This function finds the moment coefficient calculated at the leading edge"""
-        points_list = self.geometry
-        gammas = self.gammas
-        l_i = self.L_vals
-        n = int(len(points_list))
-        x, y = points_list[:,0], points_list[:,1]
-        Cm_le = 0
-        for i in range(0,n-1):
-            cos_coeff = (2*x[i]*gammas[i]+x[i]*gammas[i+1]+x[i+1]*gammas[i]+2*x[i+1]*gammas[i+1])
-            sin_coeff = (2*y[i]*gammas[i]+y[i]*gammas[i+1]+y[i+1]*gammas[i]+2*y[i+1]*gammas[i+1])
-            Cmle = l_i[i]*(cos_coeff*np.cos(self.alpha)+sin_coeff*np.sin(self.alpha))
-            Cm_le = Cm_le + Cmle
-        Cm_le = (-1/3)*Cm_le/self.vel_inf # eq 1.6.33 Mechanics of Flight
-        self.Coeff_mle = Cm_le
-
-    def calc_Cm_4(self):
-        """This function calculates the coefficient of lift at the quarter chord"""
-        Cm_4 = self.Coeff_mle + 0.25*self.Coeff_L*np.cos(self.alpha) # eq 1.1.5 Mechanics of Flight
-        self.Cm_4 = Cm_4
-    
     def program(self, i):
         """This is a run function that uses all of the functions above."""
         self.pull_nodes(i)
-        points = []
-        self.calc_L()
-        self.calc_control_points()
-        self.calc_a_matrix()
-        for j in range(self.length_alpha):
-            self.pull_alpha(j)     
-            self.calc_B_matrix()
-            self.calc_gammas()
-            self.calc_CL()
-            self.calc_Cm_le()
-            self.calc_Cm_4()
-            data = [np.degrees(self.alpha), self.Coeff_L, self.Coeff_mle, self.Cm_4]
-            points.append(data)
-        self.pull_label(i)
-        Label_modified = self.label.replace(".txt", " ")
-        print("\n                   ", Label_modified)
-        print(tabulate(points, headers=["alpha(deg)", 'CL', "Cm_le", 'Cm_c/4']), "\n")
+        self.Argos_init()
+        self.Argos_saver_scheme()
 
 if __name__ == "__main__":
-    NACA_object = vortex_panels("airfoils.json")
-    NACA_object.program(0) #### note to user: Place the name of the airfoil text file you want to evaluate in the json "airfoils" list and choose it using an integer here.
-    NACA_object.program(1) 
-    NACA_object.program(2)
+    NACA_object = Relaxation("airfoils.json")
+    NACA_object.program(0)

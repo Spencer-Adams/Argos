@@ -1,7 +1,13 @@
 {
-    "airfoilsX": ["NACA_2412_200.txt", "NACA_2421_200.txt", "NACA_0015_200.txt"],
-    "airfoils": ["NACA_2412_200_open.txt"],
-    "alpha[deg]": [-5.0,-4.0,-3.0,-2.0,-1.0,0.0,1.0,2.0,3.0,4.0,5.0],
-    "freestream_velocity": 10.0  
+    "airfoils": ["2412_100.txt"],
+    "alpha[deg]": 2.0,
+    "freestream_velocity": 10.0,
+    "initial_vortex" : 0.5,
+    "acceptable_vort_error" : 5e-1,   
+    "acceptable_source_error" : 1e-8,   
+    "acceptable_Kutta_error" : 1e-1,  
+    "max_relaxation_iterations" : 200,
+    "vortex_relaxation_factor" : 0.1,
+    "source_relaxation_factor" : 0.3
  }
  
